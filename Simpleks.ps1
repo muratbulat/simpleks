@@ -1,4 +1,4 @@
-﻿<#
+<#
     Simpleks.ps1
 
     Windows 11 için kanıta dayalı, geri alınabilir, donanım-farkında
