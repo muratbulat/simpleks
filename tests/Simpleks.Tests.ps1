@@ -1,16 +1,16 @@
 #Requires -Modules Pester
 
 <#
-    Bu testler yalnızca Simpleks.Definitions.ps1 içindeki SAF MANTIĞI
-    doğrular: tweak şeması, preset çözümleme, güvenlik kapısı.
-    Hiçbir registry/servis/görev değişikliği YAPILMAZ - Detect/Apply
-    scriptblock'ları burada çağrılmaz, sadece varlıkları ve alanları
-    doğrulanır. Bu yüzden Windows dışı runner'larda da (CI dahil) güvenle
-    çalışır.
+    Bu testler yalnızca Simpleks.ps1 içindeki SAF MANTIĞI doğrular: tweak
+    şeması, preset çözümleme, güvenlik kapısı. Dosya dot-source edildiğinde
+    arayüz açılmaz ve hiçbir registry/servis/görev değişikliği YAPILMAZ -
+    Detect/Apply scriptblock'ları burada çağrılmaz, sadece varlıkları ve
+    alanları doğrulanır. Bu yüzden Windows dışı runner'larda da (CI dahil)
+    güvenle çalışır.
 #>
 
 BeforeAll {
-    . (Join-Path $PSScriptRoot "..\Simpleks.Definitions.ps1")
+    . (Join-Path $PSScriptRoot "..\Simpleks.ps1")
     $script:AllTweaks = Get-SimpleksTweaks
 }
 
