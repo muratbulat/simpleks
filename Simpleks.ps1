@@ -831,6 +831,92 @@ function Get-SimpleksTweaks {
 }
 
 # =========================================================================
+# WPF OLAY İŞLEYİCİ YARDIMCILARI
+# =========================================================================
+# NOT: WPF olay işleyicileri (.Add_Click vb.) `.GetNewClosure()` ile
+# bağlanıyor. GetNewClosure() bir scriptblock'un YEREL değişkenlerini
+# doğru yakalar, ANCAK içine doğrudan yazılmış `$script:` referansları
+# (okuma/yazma), Dispatcher tarafından ASENKRON çağrıldığında YANLIŞ/BOŞ
+# bir "script" kapsamına gider - orijinal dosya kapsamına ULAŞMAZ (bu,
+# ölçülüp doğrulanmış gerçek bir davranış). Buna karşılık, olay işleyicisi
+# içinden ÇAĞRILAN ADLANDIRILMIŞ bir fonksiyonun kendi `$script:`
+# referansları HER ZAMAN doğru (orijinal) kapsama gider. Bu yüzden
+# `$script:` okuyan/yazan tüm mantık burada adlandırılmış fonksiyonlara
+# taşınmıştır - olay işleyicileri yalnızca UI'den değer toplayıp bu
+# fonksiyonları çağırır.
+
+function Get-SimpleksLatestBackupFile {
+    Get-ChildItem -Path $script:LogDir -Filter "backup-*.json" -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+}
+
+function Invoke-SimpleksApplyFlow {
+    param(
+        [Parameter(Mandatory)] [object[]]$SelectedTweaks,
+        [bool]$IncludeRisky,
+        [bool]$WhatIf,
+        [bool]$InstallPackages,
+        [bool]$RemoveApps
+    )
+    $script:IncludeRisky = $IncludeRisky
+
+    $runStamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $script:JsonLogPath   = Join-Path $script:LogDir "simpleks-$runStamp.jsonl"
+    $script:TextLogPath   = Join-Path $script:LogDir "simpleks-$runStamp.log"
+    $script:BackupEntries = [System.Collections.Generic.List[object]]::new()
+    $backupFile = Join-Path $script:LogDir "backup-$runStamp.json"
+
+    if (-not $WhatIf) {
+        Write-Step "Sistem Geri Yükleme noktası oluşturuluyor..."
+        try {
+            Enable-ComputerRestore -Drive "C:\" -ErrorAction SilentlyContinue
+            Checkpoint-Computer -Description "Simpleks Optimizasyon Öncesi" -RestorePointType "MODIFY_SETTINGS" -ErrorAction Stop
+            Write-Ok "Geri yükleme noktası oluşturuldu."
+        } catch {
+            Write-Warn2 "Geri yükleme noktası oluşturulamadı: $($_.Exception.Message)"
+        }
+    }
+
+    foreach ($t in $SelectedTweaks) {
+        Invoke-SimpleksTweak -Tweak $t -WhatIfOnly:$WhatIf
+        if (-not $WhatIf) { Save-SimpleksBackupFile -Path $backupFile | Out-Null }
+    }
+
+    if ($InstallPackages -and -not $WhatIf) {
+        Write-Step "Chocolatey paketleri kuruluyor..."
+        if (!(Get-Command choco -ErrorAction SilentlyContinue)) {
+            Set-ExecutionPolicy Bypass -Scope Process -Force
+            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+            Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+            $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+        }
+        foreach ($pkg in $script:ChocoPackages) {
+            choco install $pkg -y | Out-Null
+            if ($LASTEXITCODE -eq 0) { Write-Ok "$pkg kuruldu." } else { Write-Warn2 "$pkg kurulamadı." }
+        }
+    }
+
+    if ($RemoveApps -and -not $WhatIf) {
+        Write-Step "İsteğe bağlı uygulamalar kaldırılıyor..."
+        foreach ($pkgName in $script:OptionalAppxPackages) {
+            Get-AppxPackage -AllUsers -Name $pkgName -ErrorAction SilentlyContinue | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
+            Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq $pkgName } |
+                ForEach-Object { Remove-AppxProvisionedPackage -Online -PackageName $_.PackageName -ErrorAction SilentlyContinue | Out-Null }
+        }
+    }
+
+    if (-not $WhatIf) {
+        $saved = Save-SimpleksBackupFile -Path $backupFile
+        if ($saved) { Write-Ok "Geri alma verisi kaydedildi: $saved" }
+        Write-Ok "TÜM İŞLEMLER TAMAMLANDI ($($SelectedTweaks.Count) tweak işlendi)."
+        Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+        [System.Windows.MessageBox]::Show("Tamamlandı. Bazı ayarlar için yeniden başlatma gerekebilir.", "Simpleks") | Out-Null
+    } else {
+        Write-Ok "(-WhatIf: hiçbir değişiklik uygulanmadı.)"
+    }
+}
+
+# =========================================================================
 # WPF ARAYÜZÜ
 # =========================================================================
 
@@ -983,7 +1069,7 @@ function Show-SimpleksGui {
 
     $rollbackBtn.Add_Click({
         if (-not (Test-SimpleksAdmin)) { [System.Windows.MessageBox]::Show("Bu işlem Yönetici hakları gerektirir.", "Simpleks") | Out-Null; return }
-        $latest = Get-ChildItem -Path $script:LogDir -Filter "backup-*.json" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        $latest = Get-SimpleksLatestBackupFile
         if (-not $latest) { [System.Windows.MessageBox]::Show("Geri alınacak bir yedek bulunamadı.", "Simpleks") | Out-Null; return }
         $confirm = [System.Windows.MessageBox]::Show("Son çalıştırmadaki tüm değişiklikler geri alınacak ($($latest.Name)). Emin misiniz?", "Simpleks - Geri Al", "YesNo", "Warning")
         if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) { return }
@@ -998,7 +1084,7 @@ function Show-SimpleksGui {
         $selectedTweaks = @($allTweaks | Where-Object { $checkboxMap[$_.Id].IsChecked -eq $true })
         if ($selectedTweaks.Count -eq 0) { [System.Windows.MessageBox]::Show("Hiçbir tweak seçilmedi.", "Simpleks") | Out-Null; return }
 
-        $script:IncludeRisky = [bool]$riskyCheck.IsChecked
+        $includeRisky = [bool]$riskyCheck.IsChecked
         $whatIf = [bool]$whatIfCheck.IsChecked
 
         $riskyChosen = @($selectedTweaks | Where-Object { $_.SecurityImpact })
@@ -1010,60 +1096,8 @@ function Show-SimpleksGui {
 
         $applyBtn.IsEnabled = $false
         try {
-            $runStamp = Get-Date -Format "yyyyMMdd-HHmmss"
-            $script:JsonLogPath  = Join-Path $script:LogDir "simpleks-$runStamp.jsonl"
-            $script:TextLogPath  = Join-Path $script:LogDir "simpleks-$runStamp.log"
-            $script:BackupEntries = [System.Collections.Generic.List[object]]::new()
-            $backupFile = Join-Path $script:LogDir "backup-$runStamp.json"
-
-            if (-not $whatIf) {
-                Write-Step "Sistem Geri Yükleme noktası oluşturuluyor..."
-                try {
-                    Enable-ComputerRestore -Drive "C:\" -ErrorAction SilentlyContinue
-                    Checkpoint-Computer -Description "Simpleks Optimizasyon Öncesi" -RestorePointType "MODIFY_SETTINGS" -ErrorAction Stop
-                    Write-Ok "Geri yükleme noktası oluşturuldu."
-                } catch {
-                    Write-Warn2 "Geri yükleme noktası oluşturulamadı: $($_.Exception.Message)"
-                }
-            }
-
-            foreach ($t in $selectedTweaks) {
-                Invoke-SimpleksTweak -Tweak $t -WhatIfOnly:$whatIf
-                if (-not $whatIf) { Save-SimpleksBackupFile -Path $backupFile | Out-Null }
-            }
-
-            if ($installChk.IsChecked -and -not $whatIf) {
-                Write-Step "Chocolatey paketleri kuruluyor..."
-                if (!(Get-Command choco -ErrorAction SilentlyContinue)) {
-                    Set-ExecutionPolicy Bypass -Scope Process -Force
-                    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-                    Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-                    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
-                }
-                foreach ($pkg in $script:ChocoPackages) {
-                    choco install $pkg -y | Out-Null
-                    if ($LASTEXITCODE -eq 0) { Write-Ok "$pkg kuruldu." } else { Write-Warn2 "$pkg kurulamadı." }
-                }
-            }
-
-            if ($removeChk.IsChecked -and -not $whatIf) {
-                Write-Step "İsteğe bağlı uygulamalar kaldırılıyor..."
-                foreach ($pkgName in $script:OptionalAppxPackages) {
-                    Get-AppxPackage -AllUsers -Name $pkgName -ErrorAction SilentlyContinue | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
-                    Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq $pkgName } |
-                        ForEach-Object { Remove-AppxProvisionedPackage -Online -PackageName $_.PackageName -ErrorAction SilentlyContinue | Out-Null }
-                }
-            }
-
-            if (-not $whatIf) {
-                $saved = Save-SimpleksBackupFile -Path $backupFile
-                if ($saved) { Write-Ok "Geri alma verisi kaydedildi: $saved" }
-                Write-Ok "TÜM İŞLEMLER TAMAMLANDI ($($selectedTweaks.Count) tweak işlendi)."
-                Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
-                [System.Windows.MessageBox]::Show("Tamamlandı. Bazı ayarlar için yeniden başlatma gerekebilir.", "Simpleks") | Out-Null
-            } else {
-                Write-Ok "(-WhatIf: hiçbir değişiklik uygulanmadı.)"
-            }
+            Invoke-SimpleksApplyFlow -SelectedTweaks $selectedTweaks -IncludeRisky $includeRisky -WhatIf $whatIf `
+                -InstallPackages ([bool]$installChk.IsChecked) -RemoveApps ([bool]$removeChk.IsChecked)
         } finally {
             $applyBtn.IsEnabled = $true
         }
